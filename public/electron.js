@@ -3,19 +3,20 @@ const app = electron.app;
 const BrowserWindow = electron.BrowserWindow;
 const path = require("path");
 const isDev = require("electron-is-dev");
-const { networkInterfaces } = require("os");
+
 let mainWindow;
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 900,
     height: 680,
-    webPreferences: { devTools: true, nodeIntegration: true }
+    webPreferences: { nodeIntegration: true }
   });
   mainWindow.loadURL(
     isDev
       ? "http://localhost:3000"
       : `file://${path.join(__dirname, "../build/index.html")}`
   );
+  mainWindow.webContents.openDevTools();
   mainWindow.on("closed", () => (mainWindow = null));
 }
 app.on("ready", createWindow);
@@ -29,4 +30,3 @@ app.on("activate", () => {
     createWindow();
   }
 });
-console.log(networkInterfaces());
