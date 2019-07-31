@@ -20,6 +20,7 @@ type Action =
     }
   | { type: "network.interface.poll" }
   | { type: "network.local.broadcast.announce" }
+  |{ type: "network.local.broadcast.announce.sent", networkInterface:string, address: string }
   | {
       type: "network.local.broadcast.announce.received";
       id: string;
@@ -100,6 +101,7 @@ export const mainLoop = fiberLoop(
         udpBroadcastSocket.on("listening", () => {
           udpBroadcastSocket.setBroadcast(true);
         });
+        udpBroadcastSocket.on("error", (error) => {console.error(error)})
         return udpBroadcastSocket;
       }
     );
@@ -107,8 +109,14 @@ export const mainLoop = fiberLoop(
       dispatch({ type: "network.local.broadcast.announce" });
     }
     if (action.type === "network.local.broadcast.announce") {
-      Object.values(networkInterfaceInfoMap).forEach(infos =>
-        infos.forEach(info => sendBroadcastAnnounce(broadcastSocket, info))
+      Object.entries(networkInterfaceInfoMap).forEach(([networkInterface, infos]) =>
+        infos.forEach(info => sendBroadcastAnnounce(broadcastSocket, info, (error) => {
+          if (error) {
+            console.error(error)
+          } else {
+            dispatch({type: "network.local.broadcast.announce.sent", networkInterface , address: getIPv4BroadcastAddress(info)})
+          }
+        }))
       );
       setTimeout(
         () => dispatch({ type: "network.local.broadcast.announce" }),
@@ -128,6 +136,7 @@ export const mainLoop = fiberLoop(
             timestamp: Date.now()
           });
         });
+        listeningSocket.on("error", error => {console.error(error)})
         return listeningSocket;
       }
     );
@@ -192,8 +201,8 @@ function isIPv4family(
 
 function sendBroadcastAnnounce(
   broadcastSocket: Socket,
-  networkInterfaceInfo: NetworkInterfaceInfoIPv4
-) {
+  networkInterfaceInfo: NetworkInterfaceInfoIPv4,
+  callback?: (error: Error | null, bytes: number) => void) {
   var message = Buffer.from(hostname());
   const broadcastAddress = getIPv4BroadcastAddress(networkInterfaceInfo);
   broadcastSocket.send(
@@ -202,6 +211,7 @@ function sendBroadcastAnnounce(
     message.length,
     IPv4_UDP_BROADCAST_PORT,
     broadcastAddress
+    ,callback
   );
 }
 

@@ -76,7 +76,7 @@ function useLog() {
   return logs;
 }
 
-function useFiberLoopValue<C, T>(selector: (state: ReturnType<typeof mainLoop["state"]>[1]) => T) {
+function useFiberLoopValue<T>(selector: (state: ReturnType<typeof mainLoop["state"]>[1]) => T) {
   const looper = useContext(MainContext);
   const last = useRef(selector(looper.state()[1]));
   const [data, setData] = useState(selector(looper.state()[1]));
