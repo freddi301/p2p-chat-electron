@@ -7,6 +7,7 @@ import {
 import { createSocket, Socket } from "dgram";
 import { fiberLoop, memo } from "./fiber";
 import { isEqual } from "lodash";
+import Immutable from "immutable"
 
 type Action =
   | { type: "start" }
@@ -24,7 +25,8 @@ type Action =
       id: string;
       address: string;
       timestamp: number;
-    };
+    } |
+    { type: "message.enqueue", recipient: string, message: string };
 
 const IPv4_UDP_BROADCAST_PORT = 6663;
 
@@ -168,7 +170,16 @@ export const mainLoop = fiberLoop(
       },
       () => new Set()
     );
-    return { reachablePeers };
+    const messageQueueByRecipient = cell((messageQueueByRecipient: Immutable.Map<string, Immutable.List<string>>) => {
+      switch(action.type) {
+        case "message.enqueue": {
+          const {recipient,message} = action
+          return messageQueueByRecipient.set(recipient, messageQueueByRecipient.get(recipient, Immutable.List<string>()).push(message))
+        }
+        default: return messageQueueByRecipient
+      }
+    }, () => Immutable.Map())
+    return { reachablePeers, messageQueueByRecipient };
   },
   { type: "start" } as const
 );
