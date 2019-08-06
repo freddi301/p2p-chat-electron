@@ -7,18 +7,21 @@ import {
 import { createSocket, Socket } from "dgram";
 import { isEqual } from "lodash";
 import Immutable from "immutable";
-import { fiberLoop } from "../fiber/fiberLoop";
-import { ref } from "../fiber/fiberCell";
+import { fiberLoop } from "../../fiber/fiberLoop";
+import { ref } from "../../fiber/fiberCell";
 import { Action } from "./actions";
+import crypto from "crypto";
 
 const IPv4_UDP_BROADCAST_PORT = 6663;
 const IPv4_UDP_RECEIVE_PORT = 6664;
+const MESSAGE_WINDOW = 16;
 
 export const mainLoop = fiberLoop(
   (action: Action, cell, dispatch) => {
     if (action.type === "start") {
       dispatch({ type: "network.interface.poll" });
     }
+    const me = ref(cell, () => hostname());
     const networkInterfacesList = cell<string[]>(
       networkInterfacesList => {
         switch (action.type) {
@@ -151,32 +154,23 @@ export const mainLoop = fiberLoop(
       () => Immutable.Map()
     );
     const peersLastSeen = cell(
-      (peersLastSeen: Map<string, number>) => {
+      (peersLastSeen: Immutable.Map<string, number>) => {
         if (action.type === "network.local.broadcast.announce.received") {
           peersLastSeen.set(action.id, action.timestamp);
         }
         return peersLastSeen;
       },
-      () => new Map()
+      () => Immutable.Map()
     );
     const reachablePeers = cell(
-      (reachablePeers: Set<string>) => {
-        if (
-          action.type === "network.local.broadcast.announce.received" &&
-          !reachablePeers.has(action.id)
-        ) {
-          return new Set(reachablePeers).add(action.id);
-        }
+      (reachablePeers: Immutable.Set<string>) => {
         const now = Date.now();
-        const reachable = [...reachablePeers].filter(
-          peerId => (peersLastSeen.get(peerId) || 0) > now - 20 * 1000
-        );
-        if (reachable.length !== reachablePeers.size) {
-          return new Set(...reachable);
-        }
-        return reachablePeers;
+        return (action.type === "network.local.broadcast.announce.received"
+          ? reachablePeers.add(action.id)
+          : reachablePeers
+        ).filter(peerId => (peersLastSeen.get(peerId) || 0) > now - 20 * 1000);
       },
-      () => new Set()
+      () => Immutable.Set()
     );
     const messageQueueByRecipient = cell(
       (
@@ -192,6 +186,24 @@ export const mainLoop = fiberLoop(
                 .push(message)
             );
           }
+          case "message.retry": {
+            const { recipient, message } = action;
+            return messageQueueByRecipient.set(
+              recipient,
+              Immutable.List(message).concat(
+                messageQueueByRecipient.get(recipient, Immutable.List<string>())
+              )
+            );
+          }
+          case "message.acknowledgment.received": {
+            const { recipient, hash } = action;
+            return messageQueueByRecipient.set(
+              recipient,
+              messageQueueByRecipient
+                .get(recipient, Immutable.List<string>())
+                .filter(message => hashString(message) !== hash)
+            );
+          }
           default:
             return messageQueueByRecipient;
         }
@@ -202,26 +214,101 @@ export const mainLoop = fiberLoop(
       const receiveSocket = createSocket("udp4");
       receiveSocket.on("message", (message, info) => {
         console.log(message.toString(), info);
+        const parsedMessage = parseMessage(message);
+        switch (parsedMessage.type) {
+          case "ack": {
+            dispatch({
+              type: "message.acknowledgment.received",
+              recipient: parsedMessage.to,
+              hash: parsedMessage.hash
+            });
+            break;
+          }
+          case "send": {
+            dispatch({
+              type: "message.received",
+              message: parsedMessage.text,
+              sender: parsedMessage.to
+            });
+          }
+        }
       });
       receiveSocket.bind(IPv4_UDP_RECEIVE_PORT);
       return receiveSocket;
     });
-    if (action.type === "message.enqueue") {
-      const minuteAgo = Date.now() - 60 * 1000;
+    // if (action.type === "message.received") {
+    //   const address = localNetworkPeersHeartbeat
+    //     .get(recipient, Immutable.Map<string, number>())
+    //     .entrySeq()
+    //     .max((a, b) => a[1] - b[1]);
+
+    //   receiveSocket.send(
+    //     makeAckMessage(me, action.sender, action.message),
+    //     IPv4_UDP_RECEIVE_PORT,
+    //     address[0],
+    //     error => {
+    //       if (error) {
+    //         console.error(error);
+    //       }
+    //     }
+    //   );
+    // }
+    const [messagesSent, messagesToSend] = cell(
+      ([messagesSent]) => {
+        const messagesToSend = messageQueueByRecipient
+          .filter((value, key) => reachablePeers.has(key))
+          .map((messages, recipient) =>
+            messages.take(
+              MESSAGE_WINDOW -
+                messagesSent.get(recipient, Immutable.Map<string, number>())
+                  .size
+            )
+          );
+        return [
+          messagesToSend
+            .entrySeq()
+            .reduce(
+              (memo, [recipient, messages]) =>
+                memo.set(
+                  recipient,
+                  messages.reduce(
+                    (memo, message) =>
+                      memo.set(hashString(message), Date.now()),
+                    memo.get(recipient, Immutable.Map<string, number>())
+                  )
+                ),
+              messagesSent
+            ),
+          messagesToSend
+        ] as const;
+      },
+      () =>
+        [
+          Immutable.Map<string, Immutable.Map<string, number>>(),
+          Immutable.Map<string, Immutable.List<string>>()
+        ] as const
+    );
+
+    messagesToSend.forEach((messages, recipient) => {
       const address = localNetworkPeersHeartbeat
-        .get(action.recipient, Immutable.Map<string, number>())
-        .findKey(value => value > minuteAgo);
+        .get(recipient, Immutable.Map<string, number>())
+        .entrySeq()
+        .max((a, b) => a[1] - b[1]);
       if (address) {
-        receiveSocket.send(
-          action.message,
-          IPv4_UDP_RECEIVE_PORT,
-          address,
-          error => {
-            if (error) console.error(error);
-          }
-        );
+        messages.forEach(message => {
+          receiveSocket.send(
+            makeSendMessage(me, recipient, message),
+            IPv4_UDP_RECEIVE_PORT,
+            address[0],
+            error => {
+              if (error) {
+                console.error(error);
+              }
+            }
+          );
+        });
       }
-    }
+    });
     return { reachablePeers, messageQueueByRecipient };
   },
   { type: "start" } as const
@@ -261,11 +348,38 @@ function getIPv4BroadcastAddress({
     .join(".");
 }
 
-/*
-  if (there are messages waiting for ack longer than timeout) {
-    put them back to queued messages
+function hashString(text: string) {
+  return crypto
+    .createHash("sha256")
+    .update("alice", "utf8")
+    .digest("hex");
+}
+
+const x = Buffer.from("hello");
+
+function makeSendMessage(from: string, to: string, text: string) {
+  return Buffer.from("s" + hashString(from) + hashString(to) + text);
+}
+
+function makeAckMessage(from: string, to: string, text: string) {
+  return Buffer.from(
+    "a" + hashString(from) + hashString(to) + hashString(text)
+  );
+}
+
+function parseMessage(buffer: Buffer) {
+  const stringified = buffer.toString();
+  const type = stringified.slice(0, 1);
+  const from = stringified.slice(1, 1 + 64);
+  const to = stringified.slice(1 + 64, 1 + 64 + 64);
+  const payload = stringified.slice(1 + 64 + 64);
+  switch (type) {
+    case "s":
+      return { type: "send", from, to, text: payload } as const;
+    case "a":
+      return { type: "ack", from, to, hash: payload } as const;
   }
-  if (peer is up and there are enqueued messages and messages waiting for ack are less than limit) {
-    send N enqueued messages and move them to the waiting for ack queue
-  }
-*/
+  return { type: "error" } as const;
+}
+
+console.log(hashString("ciao"), hashString("ciao").length);

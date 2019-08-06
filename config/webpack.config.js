@@ -623,7 +623,8 @@ module.exports = function(webpackEnv) {
     },
     externals: {
       electron: "require('electron')",
-      os: "require('os')"
+      os: "require('os')",
+      hyperswarm: "require('hyperswarm')"
     },
     // Turn off performance processing because we utilize
     // our own hints via the FileSizeReporter

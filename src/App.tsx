@@ -1,134 +1,215 @@
-import React, {
-  useContext,
-  useEffect,
-  useRef,
-  useState,
-  useCallback,
-  useLayoutEffect
-} from "react";
-import "./App.css";
-import { mainLoop } from "./core/main";
-import Immutable from "immutable";
+import React, { useState, useCallback, useEffect, useRef } from "react";
+import { Set, Map, List } from "immutable";
+import { createHash } from "crypto";
+const hyperswarm = require("hyperswarm");
 
 const App = () => {
-  const reachablePeers = useFiberLoopValue(s => s.reachablePeers);
-  const messageQueueByRecipient = useFiberLoopValue(
-    s => s.messageQueueByRecipient
+  const topics = useTopics();
+  const messages = useMessages();
+  const swarm = useSwarm({ topics: topics.topics, addMessage: messages.add });
+  const [currentTopic, setCurrentTopic] = useState<string | null>(null);
+  const conversation = currentTopic
+    ? messages.messages.get(currentTopic, List<string>())
+    : null;
+  const send = useCallback(
+    (message: string) => {
+      if (currentTopic) {
+        messages.add(currentTopic, message);
+        swarm.send(currentTopic, message);
+      }
+    },
+    [currentTopic, swarm.send, messages.add]
   );
+  useEffect(() => {
+    topics.add("welcome");
+    setCurrentTopic(
+      createHash("sha256")
+        .update("welcome")
+        .digest("hex")
+    );
+  }, [topics.add]);
   return (
-    <div>
-      <SendMessage />
-      <ul>
-        {Array.from(reachablePeers, id => (
-          <li key={id}>{id}</li>
-        ))}
-      </ul>
-      <ul>
-        {Array.from(messageQueueByRecipient.keys(), recipient => (
-          <React.Fragment key={recipient}>
-            {recipient}
-            <ol>
-              {Array.from(
-                messageQueueByRecipient.get(
-                  recipient,
-                  Immutable.List<string>()
-                ),
-                (message, index) => (
-                  <li key={index}>{message}</li>
-                )
-              )}
-            </ol>
-          </React.Fragment>
-        ))}
-      </ul>
-      <Log />
+    <div
+      style={{
+        display: "flex",
+        width: "100vw",
+        height: "100vh",
+        position: "fixed",
+        top: 0,
+        left: 0
+      }}
+    >
+      <div style={{ width: "200px", borderRight: "1px solid black" }}>
+        <Topics
+          {...topics}
+          onSelect={setCurrentTopic}
+          currentTopic={currentTopic}
+        />
+      </div>
+      <div style={{ flexGrow: 1 }}>
+        {conversation ? (
+          <Chat conversation={conversation} send={send} />
+        ) : (
+          <>select topic</>
+        )}
+      </div>
     </div>
   );
 };
 
 export default App;
 
-function SendMessage() {
-  const looper = useContext(MainContext);
-  const [recipient, setRecipient] = useState("");
-  const [message, setMessage] = useState("");
-  const send = useCallback(() => {
-    looper.dispatch({ type: "message.enqueue", recipient, message });
-    setMessage("");
-  }, [looper, recipient, message]);
+function Topics({
+  add,
+  remove,
+  topics,
+  onSelect,
+  currentTopic
+}: {
+  onSelect(topicHash: string): void;
+  currentTopic: string | null;
+} & ReturnType<typeof useTopics>) {
+  const [text, setText] = useState("");
   return (
     <div>
-      recipient{" "}
-      <input value={recipient} onChange={e => setRecipient(e.target.value)} />
-      message{" "}
-      <input value={message} onChange={e => setMessage(e.target.value)} />
-      <button onClick={send}>send</button>
+      <div>
+        <input value={text} onChange={e => setText(e.target.value)} />
+        <button
+          onClick={() => {
+            if (text) {
+              add(text);
+              setText("");
+            }
+          }}
+        >
+          add
+        </button>
+      </div>
+      <ul>
+        {Array.from(topics.entries(), ([topicHash, topic]) => (
+          <li key={topicHash} onClick={() => onSelect(topicHash)}>
+            {topicHash === currentTopic ? <strong>{topic}</strong> : topic}
+            <button onClick={() => remove(topicHash)}>remove</button>
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }
 
-function Log() {
-  const logs = useLog();
-  const element = useRef<HTMLDivElement | null>(null);
-  const isAtBottom = useRef(false);
-  useEffect(() => {
-    if (element.current) {
-      isAtBottom.current =
-        element.current.scrollHeight - element.current.scrollTop ===
-          element.current.clientHeight ||
-        element.current.offsetHeight + element.current.scrollTop ===
-          element.current.scrollHeight;
-    }
-  }, [logs]);
-  useLayoutEffect(() => {
-    if (element.current && isAtBottom.current) {
-      element.current.scrollTo({
-        top: element.current.scrollHeight
-      });
-    }
-  }, [logs]);
+function Chat({
+  conversation,
+  send
+}: {
+  conversation: List<string>;
+  send(text: string): void;
+}) {
+  const [text, setText] = useState("");
+
   return (
-    <div ref={element} style={{ height: "300px", overflowY: "scroll" }}>
-      {logs.map((entry, index) => (
-        <div key={index}>{entry}</div>
-      ))}
+    <div style={{ flexGrow: 1, flexDirection: "column" }}>
+      <div>
+        <input value={text} onChange={e => setText(e.target.value)} />
+        <button
+          onClick={() => {
+            if (text) {
+              send(text);
+              setText("");
+            }
+          }}
+        >
+          send
+        </button>
+      </div>
+      <div style={{ overflowY: "scroll", flexGrow: 1 }}>
+        {Array.from(conversation.values(), (message, index) => (
+          <div key={index}>{message}</div>
+        ))}
+      </div>
     </div>
   );
 }
 
-const MainContext = React.createContext(mainLoop);
-
-function useLog() {
-  const looper = useContext(MainContext);
-  const [logs, setLogs] = useState([] as string[]);
-  useEffect(
-    () =>
-      looper.subscribe(([action]) => {
-        setLogs(logs => logs.concat(JSON.stringify(action)));
+function useTopics() {
+  const [topics, setTopics] = useState(Map<string, string>());
+  const add = useCallback(
+    (topic: string) =>
+      setTopics(topics => {
+        const topicHash = createHash("sha256")
+          .update(topic)
+          .digest("hex");
+        return topics.set(topicHash, topic);
       }),
-    [looper]
+    []
   );
-  return logs;
+  const remove = useCallback(
+    (topic: string) => setTopics(topics => topics.remove(topic)),
+    []
+  );
+  return { topics, add, remove };
 }
 
-function useFiberLoopValue<T>(
-  selector: (state: ReturnType<typeof mainLoop["state"]>[1]) => T
-) {
-  const looper = useContext(MainContext);
-  const last = useRef(selector(looper.state()[1]));
-  const [data, setData] = useState(selector(looper.state()[1]));
-  useEffect(
-    () =>
-      looper.subscribe(([action, state]) => {
-        const selection = selector(state);
-        if (selection !== last.current) {
-          setData(selection);
-          last.current = selection;
-        } else {
-          return last.current;
+function useMessages() {
+  const [messages, setMessages] = useState(Map<string, List<string>>());
+  const add = useCallback((topic: string, message: string) => {
+    setMessages(messages =>
+      messages.set(topic, messages.get(topic, List<string>()).push(message))
+    );
+  }, []);
+  return { messages, add };
+}
+
+function useSwarm({
+  topics,
+  addMessage
+}: {
+  topics: Map<string, string>;
+  addMessage(topicHash: string, message: string): void;
+}) {
+  const [swarm] = useState(() => hyperswarm());
+  const sockets = useRef<Map<string, Set<any>>>(Map());
+  useEffect(() => {
+    topics.forEach(topic =>
+      swarm.join(
+        createHash("sha256")
+          .update(topic)
+          .digest(),
+        {
+          lookup: true,
+          announce: true
         }
-      }),
-    [looper]
-  );
-  return data;
+      )
+    );
+    return () => {
+      topics.forEach(topic =>
+        swarm.leave(
+          createHash("sha256")
+            .update(topic)
+            .digest()
+        )
+      );
+    };
+  }, [swarm, topics]);
+  useEffect(() => {
+    swarm.on("connection", (socket: any, details: any) => {
+      console.log("new connection", details);
+      if (details.peer) {
+        const topicHex = details.peer.topic.toString("hex");
+        sockets.current = sockets.current.set(
+          topicHex,
+          sockets.current.get(topicHex, Set<any>()).add(socket)
+        );
+        socket.on("data", (message: Buffer) => {
+          console.log("new message", message, details);
+          addMessage(topicHex, message.toString());
+        });
+      }
+    });
+  }, [swarm, addMessage]);
+  const send = useCallback((topicHash: string, message: string) => {
+    sockets.current.get(topicHash, Set<any>()).forEach(socket => {
+      socket.write(message);
+    });
+  }, []);
+  return { send };
 }
