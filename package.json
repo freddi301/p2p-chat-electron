@@ -47,6 +47,7 @@
     "jest-environment-jsdom-fourteen": "0.1.0",
     "jest-resolve": "24.7.1",
     "jest-watch-typeahead": "0.3.0",
+    "libsodium-wrappers": "^0.7.5",
     "mini-css-extract-plugin": "0.5.0",
     "optimize-css-assets-webpack-plugin": "5.0.1",
     "pnp-webpack-plugin": "1.2.1",
@@ -63,6 +64,7 @@
     "sass-loader": "7.1.0",
     "semver": "6.0.0",
     "sqlite3": "^4.0.9",
+    "stun": "^2.0.0",
     "style-loader": "0.23.1",
     "terser-webpack-plugin": "1.2.3",
     "ts-pnp": "1.1.2",
@@ -81,7 +83,8 @@
     "electron-build": "electron-builder",
     "release": "yarn react-build && electron-builder --publish=always",
     "build": "yarn react-build && yarn electron-build",
-    "start": "concurrently \"cross-env BROWSER=none yarn react-start\" \"wait-on http://localhost:3000 && electron . --no-sandbox\""
+    "start": "concurrently \"cross-env BROWSER=none yarn react-start\" \"wait-on http://localhost:3000 && electron . --no-sandbox\"",
+    "postinstall": "install-app-deps"
   },
   "eslintConfig": {
     "extends": "react-app"
@@ -99,10 +102,13 @@
     ]
   },
   "devDependencies": {
+    "@types/libsodium-wrappers": "^0.7.5",
     "@types/lodash": "^4.14.136",
+    "@types/sqlite3": "^3.1.5",
     "concurrently": "^4.1.1",
     "electron": "^5.0.8",
     "electron-builder": "^21.1.5",
+    "ts-node": "^8.3.0",
     "wait-on": "^3.3.0"
   },
   "jest": {

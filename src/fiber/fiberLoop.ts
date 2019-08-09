@@ -38,7 +38,7 @@ export function fiberLoop<Action, Return>(
   return { dispatch, subscribe, state };
 }
 
-function subjectStateful<T>(initial: T) {
+export function subjectStateful<T>(initial: T) {
   type Listener = (event: T) => void;
   type Subscription = { listener: Listener };
   const subscriptions = new Set<Subscription>();
@@ -61,6 +61,7 @@ function subjectStateful<T>(initial: T) {
   }
   return [state, subscribe, publish] as const;
 }
+
 // function subject<T>() {
 //   type Listener = (event: T) => void;
 //   type Subscription = { listener: Listener };

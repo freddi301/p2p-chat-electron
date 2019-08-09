@@ -624,7 +624,8 @@ module.exports = function(webpackEnv) {
     externals: {
       electron: "require('electron')",
       os: "require('os')",
-      hyperswarm: "require('hyperswarm')"
+      hyperswarm: "require('hyperswarm')",
+      sqlite3: "require('sqlite3')"
     },
     // Turn off performance processing because we utilize
     // our own hints via the FileSizeReporter
