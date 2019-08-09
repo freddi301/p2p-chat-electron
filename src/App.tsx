@@ -9,7 +9,7 @@ import React, {
   useReducer,
   Reducer
 } from "react";
-import { Set, Map, List } from "immutable";
+import { Set, Map, List, Seq, Collection } from "immutable";
 import sodium from "libsodium-wrappers";
 import { Database } from "sqlite3";
 import { createSocket } from "dgram";
@@ -195,16 +195,28 @@ function ComposeMessage({ onSend }: { onSend(text: string): void }) {
   return (
     <>
       <input value={text} onChange={e => setText(e.target.value)} />
-      <button onClick={() => onSend(text)}>send</button>
+      <button
+        onClick={() => {
+          onSend(text);
+          setText("");
+        }}
+      >
+        send
+      </button>
     </>
   );
 }
 
+function getReachablePeers(heartbeat: any): Seq.Indexed<string> {
+  return heartbeat.keySeq();
+}
+
 function LocalPeers() {
-  const peers = useStore(heartbeatStore, heartbeat => heartbeat.keySeq());
+  const peers = useStore(heartbeatStore, getReachablePeers);
   return (
     <div>
-      -----------<br />
+      -----------
+      <br />
       local peers:
       {Array.from(peers, peer => (
         <div
@@ -306,13 +318,27 @@ function useMessages(from: string, to: string) {
   const add = useCallback(
     (message: string) => {
       setList(list => list.push({ from, to, message }));
-      insertMessage(from, to, message);
+      insertMessage(
+        from,
+        to,
+        message,
+        false,
+        sodium.crypto_generichash(32, from + to + message, undefined, "hex")
+      );
     },
     [from, to]
   );
   useEffect(() => {
-    loadMessages(from, to).then(messages =>
-      setList(list => messages.concat(list))
+    loadMessages().then(messages =>
+      setList(list =>
+        messages
+          .filter(
+            message =>
+              (message.from === from && message.to === to) ||
+              (message.from === to && message.to === from)
+          )
+          .concat(list)
+      )
     );
   }, [from, to]);
   return { list, add };
@@ -343,7 +369,7 @@ const dbReady = Promise.all([
   ),
   new Promise((resolve, reject) =>
     db.run(
-      "CREATE TABLE IF NOT EXISTS messages (from_public_key TEXT NOT NULL, to_public_key TEXT NOT NULL, message TEXT NOT NULL)",
+      "CREATE TABLE IF NOT EXISTS messages (from_public_key TEXT NOT NULL, to_public_key TEXT NOT NULL, message TEXT NOT NULL, delivered BOOLEAN NOT NULL, ack_hash TEXT PRIMARY KEY)",
       error => (error ? reject(error) : resolve())
     )
   )
@@ -400,43 +426,61 @@ async function insertContact(publicKey: string) {
 async function insertMessage(
   fromPublicKey: string,
   toPublicKey: string,
-  message: string
+  message: string,
+  delivered: boolean,
+  ackHash: string
 ) {
   await dbReady;
   db.run(
-    "INSERT INTO messages (from_public_key, to_public_key, message) VALUES ($fromPublicKey, $toPublicKey, $message)",
+    "INSERT INTO messages (from_public_key, to_public_key, message, delivered, ack_hash) VALUES ($fromPublicKey, $toPublicKey, $message, $delivered, $ackHash)",
     {
       $fromPublicKey: fromPublicKey,
       $toPublicKey: toPublicKey,
-      $message: message
+      $message: message,
+      $delivered: delivered,
+      $ackHash: ackHash
     }
   );
 }
 
-async function loadMessages(from: string, to: string) {
+async function updateMessageDelivered(delivered: boolean, ackHash: string) {
   await dbReady;
-  return new Promise<List<{ from: string; to: string; message: string }>>(
-    (resolve, reject) => {
-      db.all(
-        "SELECT from_public_key, to_public_key, message FROM messages",
-        (error, rows) => {
-          if (error) {
-            reject(error);
-          } else {
-            resolve(
-              List(
-                rows.map(({ from_public_key, to_public_key, message }) => ({
-                  from: from_public_key,
-                  to: to_public_key,
-                  message
-                }))
-              )
-            );
-          }
-        }
-      );
+  db.run(
+    "UPDATE messages SET delivered = $delivered WHERE ack_hash = $ackHash",
+    {
+      $delivered: delivered,
+      $ackHash: ackHash
     }
   );
+}
+
+async function loadMessages() {
+  await dbReady;
+  return new Promise<
+    List<{ from: string; to: string; message: string; delivered: boolean }>
+  >((resolve, reject) => {
+    db.all(
+      "SELECT from_public_key, to_public_key, message FROM messages",
+      (error, rows) => {
+        if (error) {
+          reject(error);
+        } else {
+          resolve(
+            List(
+              rows.map(
+                ({ from_public_key, to_public_key, message, delivered }) => ({
+                  from: from_public_key,
+                  to: to_public_key,
+                  message,
+                  delivered
+                })
+              )
+            )
+          );
+        }
+      }
+    );
+  });
 }
 
 const heartbeatStore = makeStore(
@@ -494,7 +538,7 @@ broadcastSocket.on("message", (message, info) => {
     });
   }
 });
-setInterval(() => {
+function broadcastHeartbeat() {
   const timestamp = Date.now();
   getAddresses().forEach(({ address, broadcast }) => {
     identitiesStore.state().forEach((privateKey, publicKey) => {
@@ -510,7 +554,8 @@ setInterval(() => {
       broadcastSocket.send(message, broadcastPort, broadcast);
     });
   });
-}, 1000);
+}
+setInterval(broadcastHeartbeat, 1000);
 
 function getAddresses() {
   const { lo, ...interfaces } = networkInterfaces();
@@ -568,6 +613,100 @@ function useStore<State, Projection>(
       }
     };
   }, [store, projection]);
-  useEffect(() => store.subscribe(listener), [listener]);
+  useEffect(() => store.subscribe(listener), [listener, store]);
   return value;
 }
+
+const dataPort = 5783;
+const dataSocket = createSocket("udp4");
+dataSocket.bind(dataPort, "0.0.0.0");
+dataSocket.on("message", (message, info) => {
+  const action: DataMessage = JSON.parse(message.toString());
+  switch (action.type) {
+    case "msg": {
+      const privateKey = identitiesStore.state().get(action.to);
+      if (privateKey) {
+        const decrypted = sodium.crypto_box_open_easy(
+          sodium.from_hex(action.message),
+          sodium.from_hex(action.nonce),
+          sodium.crypto_sign_ed25519_pk_to_curve25519(
+            sodium.from_hex(action.from)
+          ),
+          sodium.crypto_sign_ed25519_sk_to_curve25519(
+            sodium.from_hex(privateKey)
+          ),
+          "text"
+        );
+        const ackHash = sodium.crypto_generichash(
+          32,
+          action.from + action.to + decrypted,
+          undefined,
+          "hex"
+        );
+        insertMessage(action.from, action.to, decrypted, true, ackHash);
+        dataSocket.send(
+          JSON.stringify({ type: "ack", hash: ackHash }),
+          info.port,
+          info.address
+        );
+      }
+      break;
+    }
+    case "ack": {
+      updateMessageDelivered(true, action.hash);
+    }
+  }
+});
+
+type DataMessage =
+  | {
+      type: "msg";
+      from: string;
+      to: string;
+      message: string;
+      nonce: string;
+    }
+  | { type: "ack"; hash: string };
+
+async function trySend() {
+  (await loadMessages())
+    .filter(message => !message.delivered)
+    .filter(message => identitiesStore.state().has(message.from))
+    .filter(message => heartbeatStore.state().has(message.to))
+    .groupBy(message => message.to)
+    .map(messages => messages.take(4))
+    .forEach((messages, to) =>
+      messages.forEach(message => {
+        const destination = heartbeatStore.state().get(to);
+        const privateKey = identitiesStore.state().get(message.from);
+        if (destination && privateKey) {
+          const nonce = sodium.randombytes_buf(sodium.crypto_box_NONCEBYTES);
+          const packet = {
+            type: "msg",
+            from: message.from,
+            to: message.to,
+            nonce: sodium.to_hex(nonce),
+            message: sodium.crypto_box_easy(
+              message.message,
+              nonce,
+              sodium.crypto_sign_ed25519_pk_to_curve25519(
+                sodium.from_hex(message.to)
+              ),
+              sodium.crypto_sign_ed25519_sk_to_curve25519(
+                sodium.from_hex(privateKey)
+              ),
+              "hex"
+            )
+          };
+          dataSocket.send(
+            JSON.stringify(packet),
+            dataPort,
+            destination.address
+          );
+        }
+      })
+    );
+  setTimeout(trySend, 10000);
+}
+
+trySend();
