@@ -9,7 +9,7 @@ import React, {
   useReducer,
   Reducer
 } from "react";
-import { Set, Map, List, Seq, Collection } from "immutable";
+import { Set, Map, List, Seq, Collection, OrderedMap } from "immutable";
 import sodium from "libsodium-wrappers";
 import { Database } from "sqlite3";
 import { createSocket } from "dgram";
@@ -157,31 +157,34 @@ function Chat({ from, to }: { from: string; to: string }) {
           flexDirection: "column"
         }}
       >
-        {Array.from(messages.list, ({ message, from: _from }, index) => {
-          const isFromMe = from === _from;
-          return (
-            <div
-              key={index}
-              style={
-                isFromMe
-                  ? {
-                      borderLeft: "4px solid black",
-                      paddingLeft: "4px",
-                      paddingRight: "16px",
-                      alignSelf: "flex-start"
-                    }
-                  : {
-                      borderRight: "4px solid black",
-                      paddingLeft: "16px",
-                      paddingRight: "4px",
-                      alignSelf: "flex-end"
-                    }
-              }
-            >
-              {message}
-            </div>
-          );
-        })}
+        {Array.from(
+          messages.list.values(),
+          ({ message, from: _from }, index) => {
+            const isFromMe = from === _from;
+            return (
+              <div
+                key={index}
+                style={
+                  isFromMe
+                    ? {
+                        borderLeft: "4px solid black",
+                        paddingLeft: "4px",
+                        paddingRight: "16px",
+                        alignSelf: "flex-start"
+                      }
+                    : {
+                        borderRight: "4px solid black",
+                        paddingLeft: "16px",
+                        paddingRight: "4px",
+                        alignSelf: "flex-end"
+                      }
+                }
+              >
+                {message}
+              </div>
+            );
+          }
+        )}
       </div>
       <div>
         <ComposeMessage onSend={messages.add} />
@@ -313,18 +316,18 @@ function generateIdentity() {
 
 function useMessages(from: string, to: string) {
   const [list, setList] = useState(
-    List<{ from: string; to: string; message: string }>()
+    OrderedMap<string, { from: string; to: string; message: string }>()
   );
   const add = useCallback(
     (message: string) => {
-      setList(list => list.push({ from, to, message }));
-      insertMessage(
-        from,
-        to,
-        message,
-        false,
-        sodium.crypto_generichash(32, from + to + message, undefined, "hex")
+      const ackHash = sodium.crypto_generichash(
+        32,
+        from + to + message,
+        undefined,
+        "hex"
       );
+      setList(list => list.set(ackHash, { from, to, message }));
+      insertMessage(from, to, message, false, ackHash);
     },
     [from, to]
   );
@@ -341,6 +344,18 @@ function useMessages(from: string, to: string) {
       )
     );
   }, [from, to]);
+  useEffect(
+    () =>
+      subscribeMessages(message => {
+        if (
+          (message.from === from && message.to === to) ||
+          (message.from === to && message.to === from)
+        ) {
+          setList(list => list.set(message.ackHash, message));
+        }
+      }),
+    [from, to]
+  );
   return { list, add };
 }
 
@@ -457,23 +472,42 @@ async function updateMessageDelivered(delivered: boolean, ackHash: string) {
 async function loadMessages() {
   await dbReady;
   return new Promise<
-    List<{ from: string; to: string; message: string; delivered: boolean }>
+    OrderedMap<
+      string,
+      {
+        from: string;
+        to: string;
+        message: string;
+        delivered: boolean;
+        ackHash: string;
+      }
+    >
   >((resolve, reject) => {
     db.all(
-      "SELECT from_public_key, to_public_key, message FROM messages",
+      "SELECT from_public_key, to_public_key, message, delivered, ack_hash FROM messages",
       (error, rows) => {
         if (error) {
           reject(error);
         } else {
           resolve(
-            List(
+            OrderedMap(
               rows.map(
-                ({ from_public_key, to_public_key, message, delivered }) => ({
-                  from: from_public_key,
-                  to: to_public_key,
+                ({
+                  from_public_key,
+                  to_public_key,
                   message,
-                  delivered
-                })
+                  delivered,
+                  ack_hash
+                }) => [
+                  ack_hash,
+                  {
+                    from: from_public_key,
+                    to: to_public_key,
+                    message,
+                    delivered,
+                    ackHash: ack_hash
+                  }
+                ]
               )
             )
           );
@@ -644,6 +678,12 @@ dataSocket.on("message", (message, info) => {
           "hex"
         );
         insertMessage(action.from, action.to, decrypted, true, ackHash);
+        publishMessage({
+          from: action.from,
+          to: action.to,
+          message: decrypted,
+          ackHash
+        });
         dataSocket.send(
           JSON.stringify({ type: "ack", hash: ackHash }),
           info.port,
@@ -706,7 +746,16 @@ async function trySend() {
         }
       })
     );
-  setTimeout(trySend, 10000);
+  setTimeout(trySend, 1000);
 }
 
 trySend();
+
+const [_, subscribeMessages, publishMessage] = subjectStateful(
+  (null as any) as {
+    from: string;
+    to: string;
+    message: string;
+    ackHash: string;
+  }
+);
