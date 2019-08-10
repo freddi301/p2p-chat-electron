@@ -19,6 +19,7 @@ import {
   NetworkInterfaceInfoIPv4
 } from "os";
 import { subjectStateful } from "./fiber/fiberLoop";
+import ReactMarkdown from "react-markdown";
 
 const App = () => {
   const identities = useIdentities();
@@ -159,7 +160,7 @@ function Chat({ from, to }: { from: string; to: string }) {
       >
         {Array.from(
           messages.list.values(),
-          ({ message, from: _from }, index) => {
+          ({ message, from: _from, delivered }, index) => {
             const isFromMe = from === _from;
             return (
               <div
@@ -167,20 +168,20 @@ function Chat({ from, to }: { from: string; to: string }) {
                 style={
                   isFromMe
                     ? {
-                        borderLeft: "4px solid black",
+                        borderLeft: `4px solid ${delivered ? "black" : "gray"}`,
                         paddingLeft: "4px",
                         paddingRight: "16px",
                         alignSelf: "flex-start"
                       }
                     : {
-                        borderRight: "4px solid black",
+                        borderRight: `4px solid black`,
                         paddingLeft: "16px",
                         paddingRight: "4px",
                         alignSelf: "flex-end"
                       }
                 }
               >
-                {message}
+                <ReactMarkdown source={message} />
               </div>
             );
           }
@@ -197,7 +198,7 @@ function ComposeMessage({ onSend }: { onSend(text: string): void }) {
   const [text, setText] = useState("");
   return (
     <>
-      <input value={text} onChange={e => setText(e.target.value)} />
+      <textarea value={text} onChange={e => setText(e.target.value)} />
       <button
         onClick={() => {
           onSend(text);
@@ -253,14 +254,14 @@ function DesktopLayout({ left, right }: { left: ReactNode; right: ReactNode }) {
       <div
         style={{
           height: "100%",
-          width: "300px",
+          width: "200px",
           borderRight: "1px solid black",
           overflowY: "scroll"
         }}
       >
         {left}
       </div>
-      <div style={{ flexGrow: 1, width: "100%" }}>{right}</div>
+      <div style={{ flexGrow: 1, height: "100%" }}>{right}</div>
     </div>
   );
 }
@@ -316,7 +317,10 @@ function generateIdentity() {
 
 function useMessages(from: string, to: string) {
   const [list, setList] = useState(
-    OrderedMap<string, { from: string; to: string; message: string }>()
+    OrderedMap<
+      string,
+      { from: string; to: string; message: string; delivered: boolean }
+    >()
   );
   const add = useCallback(
     (message: string) => {
@@ -326,7 +330,9 @@ function useMessages(from: string, to: string) {
         undefined,
         "hex"
       );
-      setList(list => list.set(ackHash, { from, to, message }));
+      setList(list =>
+        list.set(ackHash, { from, to, message, delivered: false })
+      );
       insertMessage(from, to, message, false, ackHash);
     },
     [from, to]
@@ -351,10 +357,25 @@ function useMessages(from: string, to: string) {
           (message.from === from && message.to === to) ||
           (message.from === to && message.to === from)
         ) {
-          setList(list => list.set(message.ackHash, message));
+          setList(list =>
+            list.set(message.ackHash, { ...message, delivered: true })
+          );
         }
       }),
     [from, to]
+  );
+  useEffect(
+    () =>
+      subscribeAcks(ack => {
+        setList(list => {
+          const existing = list.get(ack);
+          if (existing) {
+            return list.set(ack, { ...existing, delivered: true });
+          }
+          return list;
+        });
+      }),
+    []
   );
   return { list, add };
 }
@@ -693,6 +714,7 @@ dataSocket.on("message", (message, info) => {
       break;
     }
     case "ack": {
+      publishAck(action.hash);
       updateMessageDelivered(true, action.hash);
     }
   }
@@ -751,11 +773,11 @@ async function trySend() {
 
 trySend();
 
-const [_, subscribeMessages, publishMessage] = subjectStateful(
-  (null as any) as {
-    from: string;
-    to: string;
-    message: string;
-    ackHash: string;
-  }
-);
+const [, subscribeMessages, publishMessage] = subjectStateful((null as any) as {
+  from: string;
+  to: string;
+  message: string;
+  ackHash: string;
+});
+
+const [, subscribeAcks, publishAck] = subjectStateful((null as any) as string);
